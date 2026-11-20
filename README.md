@@ -1,7 +1,5 @@
 # piper_robot_arm
 
-项目来源：[thu-vlnlab/piper_robot_arm](https://github.com/thu-vlnlab/piper_robot_arm)，[导入版本](https://github.com/thu-vlnlab/piper_robot_arm/commit/a611292b75bdca6ce3050e852a41d170607cea89)。
-用于采集机械臂相关的摄像头以及机械臂的驱动，及采集代码
 
 ## 启动realsense相机节点Start the camera node
   
