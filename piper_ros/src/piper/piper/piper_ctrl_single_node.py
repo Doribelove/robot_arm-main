@@ -15,7 +15,7 @@ from piper_msgs.msg import PiperStatusMsg, PosCmd
 from piper_msgs.srv import Enable
 from geometry_msgs.msg import Pose
 from scipy.spatial.transform import Rotation as R  # For Euler angle to quaternion conversion
-from numpy import clip
+from .joint_command import parse_joint_command
 
 
 class PiperRosNode(Node):
@@ -241,70 +241,20 @@ class PiperRosNode(Node):
                 self.piper.GripperCtrl(abs(gripper), 1000, 0x01, 0)
 
     def joint_callback(self, joint_data):
-        """Callback function for joint angles
+        """Forward a complete, named arm command to the enabled controller."""
+        if not self.GetEnableFlag():
+            return
+        try:
+            arm_targets, speed, gripper = parse_joint_command(joint_data, self.gripper_val_mutiple)
+        except (ValueError, OverflowError) as exc:
+            self.get_logger().warning(f"Ignoring invalid joint command: {exc}")
+            return
 
-        Args:
-            joint_data (): The joint data
-        """
-        factor = 57324.840764  # 1000*180/3.14
-        # self.get_logger().info(f"Received Joint States:")
-
-        # 创建一个字典来存储关节名称与位置的映射
-        joint_positions = {}
-        joint_6 = 0
-
-        # 遍历joint_data.name来映射位置
-        for idx, joint_name in enumerate(joint_data.name):
-            self.get_logger().info(f"{joint_name}: {joint_data.position[idx]}")
-            joint_positions[joint_name] = round(joint_data.position[idx] * factor)
-        
-        # 获取第7个关节的位置
-        if len(joint_data.position) >= 7:
-            # self.get_logger().info(f"joint_7: {joint_data.position[6]}")
-            joint_6 = round(joint_data.position[6] * 1000 * 1000)
-            joint_6 = joint_6 * self.gripper_val_mutiple
-
-        # 控制电机速度
-        if self.GetEnableFlag():
-            if joint_data.velocity != []:
-                all_zeros = all(v == 0 for v in joint_data.velocity)
-            else:
-                all_zeros = True
-            if not all_zeros:
-                lens = len(joint_data.velocity)
-                if lens == 7:
-                    vel_all = clip(round(joint_data.velocity[6]), 1, 100)
-                    self.get_logger().info(f"vel_all: {vel_all}")
-                    self.piper.MotionCtrl_2(0x01, 0x01, vel_all)
-                else:
-                    self.piper.MotionCtrl_2(0x01, 0x01, 30)
-            else:
-                self.piper.MotionCtrl_2(0x01, 0x01, 30)
-
-            # 使用关节名称来动态控制关节
-            self.piper.JointCtrl(
-                joint_positions.get('joint1', 0),
-                joint_positions.get('joint2', 0),
-                joint_positions.get('joint3', 0),
-                joint_positions.get('joint4', 0),
-                joint_positions.get('joint5', 0),
-                joint_positions.get('joint6', 0)
-            )
-
-            # 夹爪控制
-            if self.gripper_exist:
-                if len(joint_data.effort) >= 7:
-                    gripper_effort = clip(joint_data.effort[6], 0.5, 3)
-                    # self.get_logger().info(f"gripper_effort: {gripper_effort}")
-                    if not math.isnan(gripper_effort):
-                        gripper_effort = round(gripper_effort * 1000)
-                    else:
-                        # self.get_logger().warning("Gripper effort is NaN, using default value.")
-                        gripper_effort = 1000  # 设置默认值
-                    self.piper.GripperCtrl(abs(joint_6), gripper_effort, 0x01, 0)
-                else:
-                    self.piper.GripperCtrl(abs(joint_6), 1000, 0x01, 0)
-
+        self.piper.MotionCtrl_2(0x01, 0x01, speed)
+        self.piper.JointCtrl(*arm_targets)
+        if self.gripper_exist and gripper is not None:
+            opening, effort = gripper
+            self.piper.GripperCtrl(opening, effort, 0x01, 0)
 
     def enable_callback(self, enable_flag: Bool):
         """Callback function for enabling the robotic arm
