@@ -298,14 +298,14 @@ def _publish_reset_position():
 def _keyboard_listener_thread():
     """键盘监听线程（使用select非阻塞读取）"""
     global stop_requested
-    logger.info("⌨️  键盘监听线程已启动，按 'q' + Enter 停止并复位")
+    logger.info("⌨️  键盘监听线程已启动，按 'q' + Enter 停止")
     while not stop_requested:
         try:
             # 使用select检查stdin是否有输入，超时0.1秒
             if select.select([sys.stdin], [], [], 0.1)[0]:
                 line = sys.stdin.readline().strip()
                 if line.lower() == 'q':
-                    logger.warning("⚠️  检测到按键 'q'，准备停止并复位...")
+                    logger.warning("⚠️  检测到按键 'q'，准备停止...")
                     stop_requested = True
                     break
         except Exception as e:
@@ -316,7 +316,7 @@ def _keyboard_listener_thread():
 def _signal_handler(sig, frame):
     """Ctrl+C信号处理"""
     global stop_requested
-    logger.warning("⚠️  检测到 Ctrl+C，准备停止并复位...")
+    logger.warning("⚠️  检测到 Ctrl+C，准备停止...")
     stop_requested = True
 
 
@@ -364,7 +364,7 @@ def main(args: Args) -> None:
     global keyboard_listener
     keyboard_listener = threading.Thread(target=_keyboard_listener_thread, daemon=True)
     keyboard_listener.start()
-    logger.info("⌨️  键盘监听已启动 (按 'q' + Enter 或 Ctrl+C 停止并复位)")
+    logger.info("⌨️  键盘监听已启动 (按 'q' + Enter 或 Ctrl+C 停止)")
 
     action_buffer = None
     action_index = 0
@@ -567,12 +567,12 @@ def main(args: Args) -> None:
         current_request_record['executed_indices'] = current_executed_indices.copy()
         request_records.append(current_request_record)
 
-    # 如果是手动停止，发送复位指令
     if stop_requested:
-        logger.info("🏠 正在发送复位指令...")
-        _publish_reset_position()
-        time.sleep(2.0)  # 等待2秒让复位完成
-        logger.info("✅ 复位完成")
+        if args.publish_actions and ros_node is not None:
+            logger.info("🏠 正在发送复位指令...")
+            _publish_reset_position()
+            time.sleep(2.0)  # 等待2秒让复位完成
+            logger.info("✅ 复位完成")
     else:
         logger.info(f"\n✅ 执行完成! 总共执行 {total_executed} 个action, 请求 {request_count} 次")
 
