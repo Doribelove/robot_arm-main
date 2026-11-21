@@ -29,6 +29,8 @@ from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, Hi
 
 import dm_env
 
+from recording_frames import take_synchronized_frame
+
 
 class ArmDataCollector(Node):
     def __init__(self, args):
@@ -286,7 +288,7 @@ class ArmDataCollector(Node):
         获取同步后的单帧（0914 风格，去掉“跨度过大”检查）：
         - 取各路最新时间的最小值作为 frame_time
         - 把每个队列中早于 frame_time 的消息丢掉
-        - 之后各自队头（index 0）视为同一帧
+        - 取出各路对齐后的队头，每条消息仅录制一次
         - 不再要求 latest 时间之间差值必须 < 某个阈值
         """
         # 1️⃣ 多次 spin，让队列里有数据
@@ -297,65 +299,24 @@ class ArmDataCollector(Node):
         def msg_time(m):
             return m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
 
-        # 2️⃣ 检查必要数据是否到达
-        if len(self.puppet_arm_deque) == 0 or \
-           len(self.color_image_deque) == 0 or \
-           len(self.miivii_image_deque) == 0 or \
-           (self.args.use_depth_image and len(self.depth_image_deque) == 0):
+        frame = take_synchronized_frame(
+            self.puppet_arm_deque,
+            self.color_image_deque,
+            self.miivii_image_deque,
+            self.depth_image_deque if self.args.use_depth_image else None,
+        )
+        if frame is None:
             self.get_logger().warn(
-                f"[get_frame] 等待数据: "
-                f"joint={len(self.puppet_arm_deque)}>0, "
-                f"color={len(self.color_image_deque)}>0, "
-                f"miivii={len(self.miivii_image_deque)}>0, "
-                f"depth={len(self.depth_image_deque) if self.args.use_depth_image else 'N/A'}>0"
+                f"[get_frame] 等待数据: joint={len(self.puppet_arm_deque)}, "
+                f"color={len(self.color_image_deque)}, miivii={len(self.miivii_image_deque)}, "
+                f"depth={len(self.depth_image_deque) if self.args.use_depth_image else 'N/A'}"
             )
             return False
 
-        # 3️⃣ 计算各路“最新消息时间”
-        latest_times = [
-            msg_time(self.puppet_arm_deque[-1]),
-            msg_time(self.color_image_deque[-1]),
-            msg_time(self.miivii_image_deque[-1]),
-        ]
-        if self.args.use_depth_image:
-            latest_times.append(msg_time(self.depth_image_deque[-1]))
+        puppet_arm_msg, color_msg, miivii_msg, depth_msg = frame
+        frame_time = min(msg_time(msg) for msg in frame if msg is not None)
 
-        # 统一的同步时间点：所有流里“最慢”的那一路
-        frame_time = min(latest_times)
-
-        # ❌ 不再检查 max_latest - frame_time 的跨度，直接按 frame_time 对齐即可
-
-        # 4️⃣ 丢掉各队列中早于 frame_time 的消息
-        #    由于 latest_times 的最后一条 >= frame_time，这里最多丢到只剩最后一条，不会清空
-        while len(self.puppet_arm_deque) > 0 and msg_time(self.puppet_arm_deque[0]) < frame_time:
-            self.puppet_arm_deque.popleft()
-        while len(self.color_image_deque) > 0 and msg_time(self.color_image_deque[0]) < frame_time:
-            self.color_image_deque.popleft()
-        while len(self.miivii_image_deque) > 0 and msg_time(self.miivii_image_deque[0]) < frame_time:
-            self.miivii_image_deque.popleft()
-        if self.args.use_depth_image:
-            while len(self.depth_image_deque) > 0 and msg_time(self.depth_image_deque[0]) < frame_time:
-                self.depth_image_deque.popleft()
-
-        # 保险再检查一次
-        if len(self.puppet_arm_deque) == 0 or \
-           len(self.color_image_deque) == 0 or \
-           len(self.miivii_image_deque) == 0 or \
-           (self.args.use_depth_image and len(self.depth_image_deque) == 0):
-            self.get_logger().warn(
-                "[get_frame] 修剪后某路队列为空，丢弃本次同步"
-            )
-            return False
-
-        # 5️⃣ 现在各队列队头都“对齐到同一时间轴”了，直接取 index 0 作为这一帧
-        puppet_arm_msg = self.puppet_arm_deque[0]
-        color_msg      = self.color_image_deque[0]
-        miivii_msg     = self.miivii_image_deque[0]
-        depth_msg      = None
-        if self.args.use_depth_image:
-            depth_msg = self.depth_image_deque[0]
-
-        # 6️⃣ 打印同步 debug，看看时间差情况（只是观察，不做判定）
+        # 打印所选消息的时间差
         t_joint  = msg_time(puppet_arm_msg)
         t_main   = msg_time(color_msg)
         t_second = msg_time(miivii_msg)
@@ -370,7 +331,7 @@ class ArmDataCollector(Node):
             + (f", depth={t_depth:.6f} (Δ={t_depth - frame_time:+.3f}s)" if t_depth is not None else "")
         )
 
-        return puppet_arm_msg, color_msg, miivii_msg, depth_msg
+        return frame
 
 
 
@@ -401,7 +362,9 @@ class ArmDataCollector(Node):
         count = 0
         
         # 设置采集频率
-        rate = self.create_rate(self.args.frame_rate)
+        if self.args.frame_rate <= 0:
+            raise ValueError("frame_rate must be positive")
+        frame_period = 1.0 / self.args.frame_rate
         
         self.get_logger().info(f"开始收集数据，目标帧数: {self.args.max_timesteps}")
 
@@ -436,7 +399,7 @@ class ArmDataCollector(Node):
                 print(f"[主循环后] {time.time():.6f}, result={bool(result)}")
                 if not result:
                     self.get_logger().warn("数据同步失败，等待...")
-                    rate.sleep()
+                    # 回到 get_frame 继续 spin，让缺帧的订阅有机会接收新消息。
                     continue
                 
                 count += 1
@@ -487,7 +450,7 @@ class ArmDataCollector(Node):
                 
                 self.get_logger().info(f"已收集帧数据: {count}")
                 self.get_logger().info(f"即将 sleep，count={count}, time={time.time():.6f}")
-                time.sleep(1.0 / self.args.frame_rate)
+                time.sleep(frame_period)
                 self.get_logger().info(f"sleep 返回，count={count}, time={time.time():.6f}")
         except KeyboardInterrupt:
             self.get_logger().info("收到 Ctrl+C，中止采集并保存已记录数据")
