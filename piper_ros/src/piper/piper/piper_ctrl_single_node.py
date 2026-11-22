@@ -60,6 +60,8 @@ class PiperRosNode(Node):
         self.joint_ctrl.effort = [0.0] * 7
         # Enable flag
         self.__enable_flag = False
+        self._auto_enable_lock = threading.Lock()
+        self._auto_enable_cancelled = False
         # Create piper class and open CAN interface
         self.piper = C_PiperInterface(can_name=self.can_port)
         self.piper.ConnectPort()
@@ -73,46 +75,50 @@ class PiperRosNode(Node):
         self.publisher_thread.start()
 
     def GetEnableFlag(self):
-        return self.__enable_flag
+        return self.__enable_flag and self._motors_confirm(True)
+
+    def _motors_confirm(self, enabled):
+        states = self.piper.GetArmEnableStatus()
+        return len(states) == 6 and all(state == enabled for state in states)
+
+    def _take_over_auto_enable(self):
+        # Manual requests take precedence even if the startup worker is retrying.
+        with self._auto_enable_lock:
+            self._auto_enable_cancelled = True
+            self.__enable_flag = False
+
+    def _send_enable_command(self, enabled, clear_gripper_error=False):
+        if enabled:
+            self.piper.EnableArm(7)
+        else:
+            self.piper.DisableArm(7)
+        if self.gripper_exist:
+            if enabled and clear_gripper_error:
+                self.piper.GripperCtrl(0, 1000, 0x02, 0)
+            self.piper.GripperCtrl(0, 1000, 0x01 if enabled else 0x02, 0)
 
     def publish_thread(self):
         """Publish messages from the robotic arm
         """
         rate = self.create_rate(200)  # 200 Hz
-        enable_flag = False
-        # Set timeout (seconds)
-        timeout = 5
-        # Record the time before entering the loop
-        start_time = time.time()
-        elapsed_time_flag = False
-        while rclpy.ok():
-            if(self.auto_enable):
-                while not (enable_flag):
-                    elapsed_time = time.time() - start_time
-                    self.get_logger().info("--------------------")
-                    enable_flag = self.piper.GetArmLowSpdInfoMsgs().motor_1.foc_status.driver_enable_status and \
-                        self.piper.GetArmLowSpdInfoMsgs().motor_2.foc_status.driver_enable_status and \
-                        self.piper.GetArmLowSpdInfoMsgs().motor_3.foc_status.driver_enable_status and \
-                        self.piper.GetArmLowSpdInfoMsgs().motor_4.foc_status.driver_enable_status and \
-                        self.piper.GetArmLowSpdInfoMsgs().motor_5.foc_status.driver_enable_status and \
-                        self.piper.GetArmLowSpdInfoMsgs().motor_6.foc_status.driver_enable_status
-                    self.get_logger().info(f"Enable status:{enable_flag}")
-                    self.piper.EnableArm(7)
-                    self.piper.GripperCtrl(0, 1000, 0x01, 0)
-                    if(enable_flag):
-                        self.__enable_flag = True
-                    self.get_logger().info("--------------------")
-                    # Check if the timeout has been exceeded
-                    if elapsed_time > timeout:
-                        self.get_logger().info("Timeout....")
-                        elapsed_time_flag = True
-                        enable_flag = True
+        if self.auto_enable:
+            deadline = time.monotonic() + 5
+            while rclpy.ok():
+                with self._auto_enable_lock:
+                    if self._auto_enable_cancelled:
                         break
-                    time.sleep(1)
-                    pass
-            if(elapsed_time_flag):
-                self.get_logger().info("Automatic enable timeout, exiting program")
-                exit(0)
+                    self._send_enable_command(True)
+                    if self._motors_confirm(True):
+                        self.__enable_flag = True
+                        break
+                if time.monotonic() >= deadline:
+                    self.get_logger().warning(
+                        "Automatic enable timed out. Publishing feedback; retry with enable_srv."
+                    )
+                    break
+                time.sleep(1)
+
+        while rclpy.ok():
 
             self.PublishArmState()
             self.PublishArmJointAndGripper()
@@ -257,76 +263,30 @@ class PiperRosNode(Node):
             self.piper.GripperCtrl(opening, effort, 0x01, 0)
 
     def enable_callback(self, enable_flag: Bool):
-        """Callback function for enabling the robotic arm
-
-        Args:
-            enable_flag (): Boolean flag
-        """
-        self.get_logger().info(f"Received enable flag:")
-        self.get_logger().info(f"enable_flag: {enable_flag.data}")
-        if enable_flag.data:
-            self.__enable_flag = True
-            self.piper.EnableArm(7)
-            if self.gripper_exist:
-                self.piper.GripperCtrl(0, 1000, 0x02, 0)
-                self.piper.GripperCtrl(0, 1000, 0x01, 0)
-        else:
-            self.__enable_flag = False
-            self.piper.DisableArm(7)
-            if self.gripper_exist:
-                self.piper.GripperCtrl(0, 1000, 0x02, 0)
+        requested = enable_flag.data
+        self.get_logger().info(f"Received enable flag: {requested}")
+        self._take_over_auto_enable()
+        self._send_enable_command(requested, clear_gripper_error=True)
+        self.__enable_flag = requested  # Motion still requires all six motor acknowledgements.
 
     def handle_enable_service(self, req, resp):
-        """Handle enable service for the robotic arm"""
-        self.get_logger().info(f"Received request: {req.enable_request}")
-        enable_flag = False
-        loop_flag = False
-        # Set timeout duration (seconds)
-        timeout = 5
-        # Record the time before entering the loop
-        start_time = time.time()
-        while not loop_flag:
-            elapsed_time = time.time() - start_time
-            self.get_logger().info(f"--------------------")
-            enable_list = []
-            enable_list.append(self.piper.GetArmLowSpdInfoMsgs().motor_1.foc_status.driver_enable_status)
-            enable_list.append(self.piper.GetArmLowSpdInfoMsgs().motor_2.foc_status.driver_enable_status)
-            enable_list.append(self.piper.GetArmLowSpdInfoMsgs().motor_3.foc_status.driver_enable_status)
-            enable_list.append(self.piper.GetArmLowSpdInfoMsgs().motor_4.foc_status.driver_enable_status)
-            enable_list.append(self.piper.GetArmLowSpdInfoMsgs().motor_5.foc_status.driver_enable_status)
-            enable_list.append(self.piper.GetArmLowSpdInfoMsgs().motor_6.foc_status.driver_enable_status)
-
-            if req.enable_request:
-                enable_flag = all(enable_list)
-                self.piper.EnableArm(7)
-                self.piper.GripperCtrl(0, 1000, 0x01, 0)
-            else:
-                enable_flag = any(enable_list)
-                self.piper.DisableArm(7)
-                self.piper.GripperCtrl(0, 1000, 0x02, 0)
-
-            self.get_logger().info(f"Enable status: {enable_flag}")
-            self.__enable_flag = enable_flag
-            self.get_logger().info(f"--------------------")
-
-            if enable_flag == req.enable_request:
-                loop_flag = True
-                enable_flag = True
-            else:
-                loop_flag = False
-                enable_flag = False
-
-            # Check if timeout duration has been exceeded
-            if elapsed_time > timeout:
-                self.get_logger().info(f"Timeout...")
-                enable_flag = False
-                loop_flag = True
+        """Return success only when all six motors report the requested state."""
+        requested = req.enable_request
+        self.get_logger().info(f"Received enable request: {requested}")
+        self._take_over_auto_enable()
+        deadline = time.monotonic() + 5
+        while rclpy.ok():
+            self._send_enable_command(requested)
+            if self._motors_confirm(requested):
+                self.__enable_flag = requested
+                resp.enable_response = True
+                return resp
+            if time.monotonic() >= deadline:
                 break
-
             time.sleep(0.5)
 
-        resp.enable_response = enable_flag
-        self.get_logger().info(f"Returning response: {resp.enable_response}")
+        self.get_logger().warning(f"Motor enable request {requested} was not confirmed.")
+        resp.enable_response = False
         return resp
 
 
