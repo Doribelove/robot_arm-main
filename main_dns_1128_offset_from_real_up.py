@@ -380,7 +380,6 @@ def main(args: Args) -> None:
 
     next_action_buffer = None
     request_thread = None
-    request_start_time = None
     request_active = False
     request_lock = threading.Lock()
 
@@ -422,7 +421,7 @@ def main(args: Args) -> None:
                         'inference_time': inference_time,
                         'request_id': request_id
                     }
-                logger.info(f"✅ [请求 {request_id}] 插值后序列: shape={next_action_buffer['actions'].shape} (45Hz)")
+                logger.info(f"✅ [请求 {request_id}] 插值后序列: shape={interpolated_actions.shape} (45Hz)")
                 # === 新代码结束 ===
             else:
                 logger.error(f"❌ [请求 {request_id}] 返回数据中没有'actions'字段")
@@ -484,11 +483,14 @@ def main(args: Args) -> None:
             
             action_start = time.time()
 
-            if actions_executed_since_request >= args.actions_per_request and not request_active:
-                with request_lock:
+            refill_due = (actions_executed_since_request >= args.actions_per_request
+                          or action_index >= len(action_buffer))
+            with request_lock:
+                start_request = refill_due and not request_active and next_action_buffer is None
+                if start_request:
                     request_active = True
-                    request_count += 1
-                    request_start_time = time.time()
+            if start_request:
+                request_count += 1
                 request_thread = threading.Thread(target=async_request_worker, args=(request_count,), daemon=True)
                 request_thread.start()
 

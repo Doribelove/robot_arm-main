@@ -247,7 +247,6 @@ def main(args: Args) -> None:
     # 异步请求相关变量
     next_action_buffer = None  # 存储异步请求返回的新action序列
     request_thread = None  # 请求线程
-    request_start_time = None  # 请求开始时间
     request_active = False  # 是否有请求正在进行
     request_lock = threading.Lock()  # 线程锁，保护共享变量
     
@@ -275,13 +274,14 @@ def main(args: Args) -> None:
             
             # 提取action序列
             if 'actions' in action_response:
+                actions = np.array(action_response['actions'])
                 with request_lock:
                     next_action_buffer = {
-                        'actions': np.array(action_response['actions']),
+                        'actions': actions,
                         'inference_time': inference_time,
                         'request_id': request_id
                     }
-                logger.info(f"✅ [请求 {request_id}] 后台接收完成: shape={next_action_buffer['actions'].shape}, 耗时={inference_time_ms:.1f}ms")
+                logger.info(f"✅ [请求 {request_id}] 后台接收完成: shape={actions.shape}, 耗时={inference_time_ms:.1f}ms")
             else:
                 logger.error(f"❌ [请求 {request_id}] 返回数据中没有'actions'字段")
         
@@ -308,11 +308,14 @@ def main(args: Args) -> None:
             # 执行一个action
             action_start = time.time()
             # 检查是否需要触发新的异步请求
-            if actions_executed_since_request >= args.actions_per_request and not request_active:
-                with request_lock:
+            refill_due = (actions_executed_since_request >= args.actions_per_request
+                          or action_index >= len(action_buffer))
+            with request_lock:
+                start_request = refill_due and not request_active and next_action_buffer is None
+                if start_request:
                     request_active = True
-                    request_count += 1
-                    request_start_time = time.time()
+            if start_request:
+                request_count += 1
                 
                 # 启动后台请求线程
                 request_thread = threading.Thread(
