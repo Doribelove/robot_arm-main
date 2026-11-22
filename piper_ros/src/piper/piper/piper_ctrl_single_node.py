@@ -79,40 +79,23 @@ class PiperRosNode(Node):
         """Publish messages from the robotic arm
         """
         rate = self.create_rate(200)  # 200 Hz
-        enable_flag = False
-        # Set timeout (seconds)
-        timeout = 5
-        # Record the time before entering the loop
-        start_time = time.time()
-        elapsed_time_flag = False
-        while rclpy.ok():
-            if(self.auto_enable):
-                while not (enable_flag):
-                    elapsed_time = time.time() - start_time
-                    self.get_logger().info("--------------------")
-                    enable_flag = self.piper.GetArmLowSpdInfoMsgs().motor_1.foc_status.driver_enable_status and \
-                        self.piper.GetArmLowSpdInfoMsgs().motor_2.foc_status.driver_enable_status and \
-                        self.piper.GetArmLowSpdInfoMsgs().motor_3.foc_status.driver_enable_status and \
-                        self.piper.GetArmLowSpdInfoMsgs().motor_4.foc_status.driver_enable_status and \
-                        self.piper.GetArmLowSpdInfoMsgs().motor_5.foc_status.driver_enable_status and \
-                        self.piper.GetArmLowSpdInfoMsgs().motor_6.foc_status.driver_enable_status
-                    self.get_logger().info(f"Enable status:{enable_flag}")
-                    self.piper.EnableArm(7)
+        if self.auto_enable:
+            deadline = time.monotonic() + 5
+            while rclpy.ok():
+                self.piper.EnableArm(7)
+                if self.gripper_exist:
                     self.piper.GripperCtrl(0, 1000, 0x01, 0)
-                    if(enable_flag):
-                        self.__enable_flag = True
-                    self.get_logger().info("--------------------")
-                    # Check if the timeout has been exceeded
-                    if elapsed_time > timeout:
-                        self.get_logger().info("Timeout....")
-                        elapsed_time_flag = True
-                        enable_flag = True
-                        break
-                    time.sleep(1)
-                    pass
-            if(elapsed_time_flag):
-                self.get_logger().info("Automatic enable timeout, exiting program")
-                exit(0)
+                if all(self.piper.GetArmEnableStatus()):
+                    self.__enable_flag = True
+                    break
+                if time.monotonic() >= deadline:
+                    self.get_logger().warning(
+                        "Automatic enable timed out. Publishing feedback; retry with enable_srv."
+                    )
+                    break
+                time.sleep(1)
+
+        while rclpy.ok():
 
             self.PublishArmState()
             self.PublishArmJointAndGripper()
@@ -299,11 +282,13 @@ class PiperRosNode(Node):
             if req.enable_request:
                 enable_flag = all(enable_list)
                 self.piper.EnableArm(7)
-                self.piper.GripperCtrl(0, 1000, 0x01, 0)
+                if self.gripper_exist:
+                    self.piper.GripperCtrl(0, 1000, 0x01, 0)
             else:
                 enable_flag = any(enable_list)
                 self.piper.DisableArm(7)
-                self.piper.GripperCtrl(0, 1000, 0x02, 0)
+                if self.gripper_exist:
+                    self.piper.GripperCtrl(0, 1000, 0x02, 0)
 
             self.get_logger().info(f"Enable status: {enable_flag}")
             self.__enable_flag = enable_flag
