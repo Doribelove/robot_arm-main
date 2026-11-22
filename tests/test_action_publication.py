@@ -37,6 +37,7 @@ class ActionPublicationTest(unittest.TestCase):
         infer.return_value = {"actions": np.zeros((3, 7))}
         clock = Mock()
         clock.time.return_value = 0.0
+        clock.monotonic.return_value = 0.0
         if exit_mode == "interrupt":
             clock.sleep.side_effect = lambda _: controller._signal_handler(None, None)
         elif exit_mode == "inference_error":
@@ -46,6 +47,7 @@ class ActionPublicationTest(unittest.TestCase):
             controller, _init_ros_node=Mock(), _observation_thu_vlna=Mock(),
             _interpolate_actions=lambda actions, **kwargs: actions,
             ros_node=node, rclpy=Mock(), JointState=Mock(), stop_requested=False,
+            latest_joint_state_time=0.0, latest_image_time=0.0, latest_wrist_image_time=0.0,
             _websocket_client_policy=policy_client, signal=Mock(), time=clock,
             threading=MagicMock(), tqdm=MagicMock(), TimingRecorder=Mock(),
         ):
