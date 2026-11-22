@@ -229,7 +229,7 @@ Start the control node.
 
 ```shell
 # start the node
-ros2 run piper piper_single_ctrl --ros-args -p can_port:=can0 -p auto_enable:=false -p gripper_exist:=true -p gripper_val_mutiple:=2
+ros2 run piper piper_single_ctrl --ros-args -r joint_ctrl_single:=/joint_states -p can_port:=can0 -p auto_enable:=false -p gripper_exist:=true -p gripper_val_mutiple:=2
 # start the launch
 ros2 launch piper start_single_piper.launch.py can_port:=can0 auto_enable:=false gripper_exist:=false gripper_val_mutiple:=2
 # Or,the node can be started with default parameters
