@@ -24,6 +24,8 @@ import rich
 import tqdm
 import tyro
 
+from live_observations import live_input_ages
+
 # ROS2导入
 import rclpy
 from rclpy.node import Node
@@ -70,6 +72,7 @@ class Args:
     data_freq: float = 15.0  # 插值后的目标频率（插值到45Hz，所以执行频率也应该是45Hz）
     actions_per_request: int = 10
     output_dir: pathlib.Path = pathlib.Path("./saved_data_image")
+    max_observation_age: float = 1.0  # 最大实时输入接收间隔（秒）
 
 
 class TimingRecorder:
@@ -321,6 +324,22 @@ def _signal_handler(sig, frame):
 
 
 def main(args: Args) -> None:
+    global ros_spin_active
+    if args.env == EnvMode.THU_VLNA and not 0 < args.max_observation_age < float("inf"):
+        raise ValueError("max_observation_age must be finite and positive")
+    try:
+        _run_controller(args)
+    finally:
+        if ros_node is not None:
+            ros_spin_active = False
+            if ros_spin_thread is not None:
+                ros_spin_thread.join(timeout=1.0)
+            ros_node.destroy_node()
+            rclpy.shutdown()
+            logger.info("ROS节点已关闭")
+
+
+def _run_controller(args: Args) -> None:
     timestamp = _get_timestamp()
     logger.info(f"📅 运行时间戳: {timestamp}")
     logger.info(f"🔧 方案: 位置补偿 (Offset Compensation)")
@@ -337,7 +356,7 @@ def main(args: Args) -> None:
         EnvMode.ALOHA_SIM: _random_observation_aloha,
         EnvMode.DROID: _random_observation_droid,
         EnvMode.LIBERO: _random_observation_libero,
-        EnvMode.THU_VLNA: _observation_thu_vlna,
+        EnvMode.THU_VLNA: lambda: _observation_thu_vlna(args.max_observation_age),
     }[args.env]
 
     policy = _websocket_client_policy.WebsocketClientPolicy(
@@ -476,6 +495,8 @@ def main(args: Args) -> None:
 
     with tqdm.tqdm(total=args.num_steps, desc="Executing actions [OFFSET]") as pbar:
         while total_executed < args.num_steps:
+            if args.env == EnvMode.THU_VLNA:
+                _check_live_inputs(args.max_observation_age)
             # 检查停止标志
             if stop_requested:
                 logger.warning("⚠️  收到停止请求，准备退出...")
@@ -557,6 +578,8 @@ def main(args: Args) -> None:
                 if not action_published:
                     logger.info("开始发布action到 /joint_states 话题...")
                     action_published = True
+                if args.env == EnvMode.THU_VLNA:
+                    _check_live_inputs(args.max_observation_age)
                 ros_node.publish_action(current_action)
 
             pbar.update(1)
@@ -571,6 +594,8 @@ def main(args: Args) -> None:
 
     if stop_requested:
         if args.publish_actions and ros_node is not None:
+            if args.env == EnvMode.THU_VLNA:
+                _check_live_inputs(args.max_observation_age)
             logger.info("🏠 正在发送复位指令...")
             _publish_reset_position()
             time.sleep(2.0)  # 等待2秒让复位完成
@@ -612,15 +637,6 @@ def main(args: Args) -> None:
     #     # _plot_actions(action_array, args.output_dir, timestamp)
     #     # _plot_comparison(action_array, actual_array, args.output_dir, timestamp)
     #     # _plot_request_actions(request_records, args.output_dir, timestamp)
-
-    global ros_spin_active, ros_spin_thread
-    if ros_node is not None:
-        ros_spin_active = False
-        if ros_spin_thread is not None:
-            ros_spin_thread.join(timeout=1.0)
-        ros_node.destroy_node()
-        rclpy.shutdown()
-        logger.info("ROS节点已关闭")
 
 
 def _random_observation_aloha() -> dict:
@@ -670,19 +686,19 @@ def _init_ros_node():
         def joint_callback(self, msg):
             global latest_joint_state, latest_joint_state_time
             latest_joint_state = np.array(msg.position[:7])
-            latest_joint_state_time = time.time()
+            latest_joint_state_time = time.monotonic()
 
         def image_callback(self, msg):
             global latest_image, latest_image_time
             cv_image = cv_bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
             latest_image = cv2.resize(cv_image, (224, 224))
-            latest_image_time = time.time()
+            latest_image_time = time.monotonic()
 
         def wrist_image_callback(self, msg):
             global latest_wrist_image, latest_wrist_image_time
             cv_image = cv_bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
             latest_wrist_image = cv2.resize(cv_image, (224, 224))
-            latest_wrist_image_time = time.time()
+            latest_wrist_image_time = time.monotonic()
 
         def publish_action(self, action_positions):
             msg = JointState()
@@ -710,33 +726,35 @@ def _init_ros_node():
     logger.info("ROS节点初始化完成")
 
 
-def _observation_thu_vlna() -> dict:
+def _check_live_inputs(max_age):
+    return live_input_ages(time.monotonic(), max_age, latest_joint_state_time,
+                           latest_image_time, latest_wrist_image_time)
+
+
+def _observation_thu_vlna(max_age: float) -> dict:
     global latest_joint_state, latest_image, latest_wrist_image
     global latest_joint_state_time, latest_image_time, latest_wrist_image_time
     max_wait = 10.0
-    wait_start = time.time()
-    while latest_joint_state is None or latest_image is None or latest_wrist_image is None:
+    wait_start = time.monotonic()
+    while latest_joint_state_time is None or latest_image_time is None or latest_wrist_image_time is None:
         missing = []
-        if latest_joint_state is None: missing.append("关节状态")
-        if latest_image is None: missing.append("主相机(MIIVII)")
-        if latest_wrist_image is None: missing.append("腕部相机(RealSense)")
-        elapsed = time.time() - wait_start
+        if latest_joint_state_time is None: missing.append("关节状态")
+        if latest_image_time is None: missing.append("主相机(MIIVII)")
+        if latest_wrist_image_time is None: missing.append("腕部相机(RealSense)")
+        elapsed = time.monotonic() - wait_start
         if elapsed > max_wait:
             raise RuntimeError(f"等待ROS数据超时({max_wait}秒): {', '.join(missing)}")
         logger.warning(f"⏳ 等待ROS数据 ({elapsed:.1f}s): {', '.join(missing)}")
         time.sleep(0.1)
 
-    current_time = time.time()
-    joint_age_ms = (current_time - latest_joint_state_time) * 1000 if latest_joint_state_time else 999
-    image_age_ms = (current_time - latest_image_time) * 1000 if latest_image_time else 999
-    wrist_age_ms = (current_time - latest_wrist_image_time) * 1000 if latest_wrist_image_time else 999
+    joint_age, image_age, wrist_age = _check_live_inputs(max_age)
 
     if hasattr(_observation_thu_vlna, 'call_count'):
         _observation_thu_vlna.call_count += 1
     else:
         _observation_thu_vlna.call_count = 0
     if _observation_thu_vlna.call_count % 10 == 0:
-        logger.info(f"📊 数据年龄 | 关节: {joint_age_ms:.0f}ms, 主相机: {image_age_ms:.0f}ms, 腕相机: {wrist_age_ms:.0f}ms")
+        logger.info(f"📊 数据年龄 | 关节: {joint_age * 1000:.0f}ms, 主相机: {image_age * 1000:.0f}ms, 腕相机: {wrist_age * 1000:.0f}ms")
 
     return {
         "observation/state": latest_joint_state,

@@ -37,6 +37,7 @@ class ActionPublicationTest(unittest.TestCase):
         infer.return_value = {"actions": np.zeros((3, 7))}
         clock = Mock()
         clock.time.return_value = 0.0
+        clock.monotonic.return_value = 0.0
         if exit_mode == "interrupt":
             clock.sleep.side_effect = lambda _: controller._signal_handler(None, None)
         elif exit_mode == "inference_error":
@@ -46,6 +47,7 @@ class ActionPublicationTest(unittest.TestCase):
             controller, _init_ros_node=Mock(), _observation_thu_vlna=Mock(),
             _interpolate_actions=lambda actions, **kwargs: actions,
             ros_node=node, rclpy=Mock(), JointState=Mock(), stop_requested=False,
+            latest_joint_state_time=0.0, latest_image_time=0.0, latest_wrist_image_time=0.0,
             _websocket_client_policy=policy_client, signal=Mock(), time=clock,
             threading=MagicMock(), tqdm=MagicMock(), TimingRecorder=Mock(),
         ):
@@ -106,13 +108,16 @@ class ActionRefillTest(unittest.TestCase):
                 self.fail(f"Playback stalled after {node.publish_action.call_count} commands")
             if workers and clock.sleep.call_count >= workers[0][0]:
                 _, target, arguments = workers.pop(0)
+                controller.latest_joint_state = np.ones(7)
                 target(*arguments)
 
         threads.Thread.side_effect = make_thread
         clock = Mock()
-        clock.time.return_value = 0
+        clock.monotonic.return_value = clock.time.return_value = 0
         clock.sleep.side_effect = tick
         patches = dict(_init_ros_node=Mock(), _observation_thu_vlna=Mock(),
+                       latest_joint_state=np.zeros(7), latest_joint_state_time=0.0,
+                       latest_image_time=0.0, latest_wrist_image_time=0.0,
                        _websocket_client_policy=client, ros_node=node, rclpy=Mock(),
                        time=clock, threading=threads, tqdm=MagicMock(), TimingRecorder=Mock())
         if not legacy:
